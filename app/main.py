@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.openapi.utils import get_openapi
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
@@ -25,6 +26,8 @@ from .config import (
     RECEIVER_ADDRESS,
     RECEIVER_ADDRESS_CHECKSUM,
     REVENUE_LOG_PATH,
+    X402_BATCH_PRICE_ATOMIC,
+    X402_LINKS_PRICE_ATOMIC,
     X402_PRICE_ATOMIC,
 )
 from .x402 import (
@@ -32,8 +35,11 @@ from .x402 import (
     X402Error,
     X402FacilitatorUnavailable,
     X402PaymentRejected,
+    build_batch_bazaar_spec,
+    build_links_bazaar_spec,
     build_payment_required_payload,
     build_payment_requirements,
+    build_well_known_x402_manifest,
     encode_b64_json,
     settle_payment,
     verify_payment,
@@ -245,7 +251,7 @@ async def root(request: Request) -> JSONResponse | HTMLResponse:
 curl -s -X POST {base}/v1/extract -H 'X-API-Key: YOUR_KEY' -H 'Content-Type: application/json' -d '{{"url": "https://example.com"}}'
 curl -s -X POST {base}/v1/billing/redeem -H 'X-API-Key: YOUR_KEY' -H 'Content-Type: application/json' -d '{{"chain": "base", "tx_hash": "0x..."}}'</pre>
   </div>
-  <p>Agent Specs: <a href="/llms.txt">/llms.txt</a> &middot; <a href="/skill.md">/skill.md</a> &middot; <a href="/.well-known/agent.json">/.well-known/agent.json</a> &middot; <a href="/docs">/docs</a></p>
+  <p>Agent Specs: <a href="/llms.txt">/llms.txt</a> &middot; <a href="/skill.md">/skill.md</a> &middot; <a href="/.well-known/x402">/.well-known/x402</a> &middot; <a href="/.well-known/mcp.json">/.well-known/mcp.json</a> &middot; <a href="/.well-known/agent.json">/.well-known/agent.json</a> &middot; <a href="/docs">/docs</a></p>
 </body>
 </html>"""
         return HTMLResponse(content=html)
@@ -259,6 +265,8 @@ curl -s -X POST {base}/v1/billing/redeem -H 'X-API-Key: YOUR_KEY' -H 'Content-Ty
             "openapi": "/openapi.json",
             "llms_txt": "/llms.txt",
             "skill_md": "/skill.md",
+            "well_known_x402": "/.well-known/x402",
+            "well_known_mcp": "/.well-known/mcp.json",
             "agent_card": "/.well-known/agent.json",
             "endpoints": {
                 "health": "GET /health",
@@ -271,10 +279,34 @@ curl -s -X POST {base}/v1/billing/redeem -H 'X-API-Key: YOUR_KEY' -H 'Content-Ty
                 "extract_batch": "POST /v1/extract/batch",
                 "x402_extract_get": "GET /v1/x402/extract?url=https://example.com",
                 "x402_extract_post": "POST /v1/x402/extract",
+                "x402_links_get": "GET /v1/x402/links?url=https://example.com",
+                "x402_extract_batch_post": "POST /v1/x402/extract/batch",
                 "mcp": "POST /mcp",
             },
         }
     )
+
+
+@app.get("/.well-known/x402")
+async def well_known_x402(request: Request) -> dict[str, Any]:
+    """Machine-readable x402 service discovery manifest."""
+    return build_well_known_x402_manifest(_public_base_url(request))
+
+
+@app.get("/.well-known/mcp.json")
+async def well_known_mcp(request: Request) -> dict[str, Any]:
+    """Machine-readable MCP server discovery metadata."""
+    base = _public_base_url(request)
+    return {
+        "name": "neon-api",
+        "version": "0.1.0",
+        "description": "SSRF-safe Web-to-Clean-Markdown MCP server with free trial keys and Base/Polygon USDC billing.",
+        "url": f"{base}/mcp",
+        "transport": "streamable-http",
+        "protocolVersion": "2024-11-05",
+        "documentationUrl": f"{base}/skill.md",
+        "tools": MCP_TOOLS,
+    }
 
 
 @app.get("/.well-known/agent.json")
@@ -288,6 +320,8 @@ async def agent_card(request: Request) -> dict[str, Any]:
         "documentationUrl": f"{base}/skill.md",
         "llmsTxtUrl": f"{base}/llms.txt",
         "openapiUrl": f"{base}/openapi.json",
+        "x402ManifestUrl": f"{base}/.well-known/x402",
+        "mcpManifestUrl": f"{base}/.well-known/mcp.json",
         "authentication": {
             "schemes": ["apiKey", "x402"],
             "header": "X-API-Key",
@@ -302,12 +336,16 @@ async def agent_card(request: Request) -> dict[str, Any]:
             "redeemEndpoint": f"{base}/v1/billing/redeem",
             "x402Network": BASE_CAIP2,
             "x402PriceUsdc": round(int(X402_PRICE_ATOMIC) / 1_000_000, 6),
+            "x402LinksPriceUsdc": round(int(X402_LINKS_PRICE_ATOMIC) / 1_000_000, 6),
+            "x402BatchPriceUsdc": round(int(X402_BATCH_PRICE_ATOMIC) / 1_000_000, 6),
             "paymentUris1Usdc": _eip681_usdc_uris(1.0),
         },
         "capabilities": {
             "extract": f"{base}/v1/extract",
             "extractBatch": f"{base}/v1/extract/batch",
             "x402Extract": f"{base}/v1/x402/extract",
+            "x402Links": f"{base}/v1/x402/links",
+            "x402ExtractBatch": f"{base}/v1/x402/extract/batch",
             "mcp": f"{base}/mcp",
         },
     }
@@ -345,8 +383,11 @@ async def llms_txt(request: Request) -> str:
         f"5. Extract Markdown: POST {base}/v1/extract with header X-API-Key and {{\"url\": \"https://...\"}}\n"
         f"6. Batch Extract (up to 10 URLs): POST {base}/v1/extract/batch with header X-API-Key and {{\"urls\": [\"https://...\"]}}\n"
         f"7. Pay-per-call x402 (no API key, $0.01 USDC on Base): GET {base}/v1/x402/extract?url=https://example.com or POST {base}/v1/x402/extract\n"
-        f"8. MCP Server (JSON-RPC 2.0): POST {base}/mcp\n"
-        f"9. Full agent integration guide: GET {base}/skill.md\n"
+        f"8. Pay-per-call x402 links ($0.005 USDC on Base): GET {base}/v1/x402/links?url=https://example.com\n"
+        f"9. Pay-per-call x402 batch ($0.05 USDC on Base, up to 10 URLs): POST {base}/v1/x402/extract/batch\n"
+        f"10. Discovery manifests: GET {base}/.well-known/x402 | GET {base}/.well-known/mcp.json | GET {base}/openapi.json\n"
+        f"11. MCP Server (JSON-RPC 2.0): POST {base}/mcp\n"
+        f"12. Full agent integration guide: GET {base}/skill.md\n"
     )
 
 
@@ -363,7 +404,10 @@ async def skill_md(request: Request) -> str:
         "## Pricing\n"
         f"- **Free trial**: {FREE_TRIAL_CREDITS} credits (`POST {base}/v1/keys/free`)\n"
         f"- **Prepaid API key**: {CREDITS_PER_USDC} credits per 1.00 USDC (`$0.001 / URL`)\n"
-        f"- **Native x402 v2 (no API key)**: `$0.01 USDC` per call on Base (`{BASE_CAIP2}`) via `GET/POST {base}/v1/x402/extract`\n"
+        f"- **Native x402 v2 (no API key, Base `{BASE_CAIP2}`)**:\n"
+        f"  - `GET/POST {base}/v1/x402/extract` — `$0.01 USDC` per URL\n"
+        f"  - `GET {base}/v1/x402/links` — `$0.005 USDC` per URL\n"
+        f"  - `POST {base}/v1/x402/extract/batch` — `$0.05 USDC` for up to 10 URLs\n"
         f"- **USDC Receiver (Base / Polygon)**: `{RECEIVER_ADDRESS}`\n\n"
         "## Usage\n"
         "```bash\n"
@@ -569,12 +613,23 @@ def _x402_402_response(
     description: str,
     method: str,
     error: str = "PAYMENT-SIGNATURE header is required",
+    *,
+    amount_atomic: str = X402_PRICE_ATOMIC,
+    bazaar_spec: tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None = None,
+    tags: list[str] | None = None,
 ) -> JSONResponse:
+    spec_kwargs: dict[str, Any] = {}
+    if bazaar_spec is not None:
+        spec_kwargs["input_info"], spec_kwargs["input_schema"], spec_kwargs["output_example"] = bazaar_spec
+    if tags is not None:
+        spec_kwargs["tags"] = tags
     payload = build_payment_required_payload(
         resource_url=resource_url,
         description=description,
         method=method,
         error=error,
+        amount_atomic=amount_atomic,
+        **spec_kwargs,
     )
     return JSONResponse(
         status_code=402,
@@ -582,6 +637,110 @@ def _x402_402_response(
         headers={
             "PAYMENT-REQUIRED": encode_b64_json(payload),
             "Cache-Control": "no-store",
+        },
+    )
+
+
+async def _verify_x402_or_challenge(
+    request: Request,
+    *,
+    path: str,
+    method: str,
+    description: str,
+    amount_atomic: str = X402_PRICE_ATOMIC,
+    bazaar_spec: tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None = None,
+    tags: list[str] | None = None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, JSONResponse | None]:
+    resource_url = _x402_resource_url(request, path)
+    payment_header = request.headers.get("payment-signature") or request.headers.get("x-payment")
+    if not payment_header:
+        return None, None, _x402_402_response(
+            resource_url,
+            description,
+            method,
+            amount_atomic=amount_atomic,
+            bazaar_spec=bazaar_spec,
+            tags=tags,
+        )
+
+    requirements = build_payment_requirements(amount_atomic=amount_atomic)
+    try:
+        verified = await verify_payment(payment_header, requirements)
+    except (X402Error, X402PaymentRejected) as exc:
+        return None, None, _x402_402_response(
+            resource_url,
+            description,
+            method,
+            error=str(exc),
+            amount_atomic=amount_atomic,
+            bazaar_spec=bazaar_spec,
+            tags=tags,
+        )
+    except X402FacilitatorUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return verified, requirements, None
+
+
+async def _settle_and_build_x402_response(
+    request: Request,
+    *,
+    path: str,
+    method: str,
+    description: str,
+    verified: dict[str, Any],
+    requirements: dict[str, Any],
+    amount_atomic: str,
+    body: dict[str, Any],
+    bazaar_spec: tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None = None,
+    tags: list[str] | None = None,
+) -> JSONResponse:
+    resource_url = _x402_resource_url(request, path)
+    try:
+        settlement = await settle_payment(
+            verified["facilitator_url"],
+            verified["x402_version"],
+            verified["payment_payload"],
+            requirements,
+        )
+    except X402PaymentRejected as exc:
+        return _x402_402_response(
+            resource_url,
+            description,
+            method,
+            error=str(exc),
+            amount_atomic=amount_atomic,
+            bazaar_spec=bazaar_spec,
+            tags=tags,
+        )
+
+    amount_usdc = round(int(amount_atomic) / 1_000_000, 6)
+    payer = settlement.get("payer", "") or verified.get("payer", "")
+    _record_revenue_event(
+        {
+            "source": "x402",
+            "chain": "base",
+            "network": settlement.get("network", BASE_CAIP2),
+            "amount_usdc": amount_usdc,
+            "credits_added": 0,
+            "tx_hash": settlement.get("transaction", ""),
+            "payer": payer,
+        }
+    )
+
+    body["payment"] = {
+        "protocol": "x402",
+        "network": settlement.get("network", BASE_CAIP2),
+        "amount_usdc": amount_usdc,
+        "transaction": settlement.get("transaction", ""),
+        "payer": payer,
+    }
+    encoded_settlement = encode_b64_json(settlement)
+    return JSONResponse(
+        status_code=200,
+        content=body,
+        headers={
+            "PAYMENT-RESPONSE": encoded_settlement,
+            "X-PAYMENT-RESPONSE": encoded_settlement,
         },
     )
 
@@ -600,18 +759,16 @@ async def _handle_x402_extract(
         "Returns clean Markdown, title, metadata, word count, and optional links. "
         "$0.01 USDC per call on Base via x402."
     )
-    resource_url = _x402_resource_url(request, "/v1/x402/extract")
-    payment_header = request.headers.get("payment-signature") or request.headers.get("x-payment")
-    if not payment_header:
-        return _x402_402_response(resource_url, description, method)
-
-    requirements = build_payment_requirements()
-    try:
-        verified = await verify_payment(payment_header, requirements)
-    except (X402Error, X402PaymentRejected) as exc:
-        return _x402_402_response(resource_url, description, method, error=str(exc))
-    except X402FacilitatorUnavailable as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    verified, requirements, challenge = await _verify_x402_or_challenge(
+        request,
+        path="/v1/x402/extract",
+        method=method,
+        description=description,
+        amount_atomic=X402_PRICE_ATOMIC,
+    )
+    if challenge is not None:
+        return challenge
+    assert verified is not None and requirements is not None
 
     extract_kwargs: dict[str, Any] = {"include_links": include_links}
     if extract_links:
@@ -626,29 +783,6 @@ async def _handle_x402_extract(
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Upstream fetch failed: {type(exc).__name__}") from exc
 
-    try:
-        settlement = await settle_payment(
-            verified["facilitator_url"],
-            verified["x402_version"],
-            verified["payment_payload"],
-            requirements,
-        )
-    except X402PaymentRejected as exc:
-        return _x402_402_response(resource_url, description, method, error=str(exc))
-
-    amount_usdc = round(int(X402_PRICE_ATOMIC) / 1_000_000, 6)
-    _record_revenue_event(
-        {
-            "source": "x402",
-            "chain": "base",
-            "network": settlement.get("network", BASE_CAIP2),
-            "amount_usdc": amount_usdc,
-            "credits_added": 0,
-            "tx_hash": settlement.get("transaction", ""),
-            "payer": settlement.get("payer", "") or verified.get("payer", ""),
-        }
-    )
-
     body: dict[str, Any] = {
         "url": doc.url,
         "title": doc.title,
@@ -656,25 +790,19 @@ async def _handle_x402_extract(
         "markdown": doc.markdown,
         "word_count": doc.word_count,
         "char_count": doc.char_count,
-        "payment": {
-            "protocol": "x402",
-            "network": settlement.get("network", BASE_CAIP2),
-            "amount_usdc": amount_usdc,
-            "transaction": settlement.get("transaction", ""),
-            "payer": settlement.get("payer", "") or verified.get("payer", ""),
-        },
     }
     if extract_links:
         body["links"] = list(doc.links)
 
-    encoded_settlement = encode_b64_json(settlement)
-    return JSONResponse(
-        status_code=200,
-        content=body,
-        headers={
-            "PAYMENT-RESPONSE": encoded_settlement,
-            "X-PAYMENT-RESPONSE": encoded_settlement,
-        },
+    return await _settle_and_build_x402_response(
+        request,
+        path="/v1/x402/extract",
+        method=method,
+        description=description,
+        verified=verified,
+        requirements=requirements,
+        amount_atomic=X402_PRICE_ATOMIC,
+        body=body,
     )
 
 
@@ -721,6 +849,153 @@ async def x402_extract_post(request: Request) -> JSONResponse:
         include_links=bool(body.get("include_links", True)),
         extract_links=bool(body.get("extract_links", False)),
         max_chars=max_chars,
+    )
+
+
+@app.get("/v1/x402/links")
+async def x402_links_get(
+    request: Request,
+    url: str = "https://example.com",
+) -> JSONResponse:
+    """Pay-per-call x402 v2 structured outbound link extractor ($0.005 USDC on Base)."""
+    description = (
+        "SSRF-safe structured outbound link extraction for AI agents. "
+        "Returns deduplicated absolute HTTP/HTTPS links with anchor text. "
+        "$0.005 USDC per call on Base via x402."
+    )
+    bazaar_spec = build_links_bazaar_spec()
+    tags = ["links", "crawler", "web", "scraping", "llm", "agent"]
+    verified, requirements, challenge = await _verify_x402_or_challenge(
+        request,
+        path="/v1/x402/links",
+        method="GET",
+        description=description,
+        amount_atomic=X402_LINKS_PRICE_ATOMIC,
+        bazaar_spec=bazaar_spec,
+        tags=tags,
+    )
+    if challenge is not None:
+        return challenge
+    assert verified is not None and requirements is not None
+
+    try:
+        doc = await extract_url(url, include_links=True, extract_links=True)
+    except ExtractionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Upstream fetch failed: {type(exc).__name__}") from exc
+
+    links = list(doc.links)
+    return await _settle_and_build_x402_response(
+        request,
+        path="/v1/x402/links",
+        method="GET",
+        description=description,
+        verified=verified,
+        requirements=requirements,
+        amount_atomic=X402_LINKS_PRICE_ATOMIC,
+        body={
+            "url": doc.url,
+            "title": doc.title,
+            "description": doc.description,
+            "link_count": len(links),
+            "links": links,
+        },
+        bazaar_spec=bazaar_spec,
+        tags=tags,
+    )
+
+
+@app.post("/v1/x402/extract/batch")
+async def x402_extract_batch_post(request: Request) -> JSONResponse:
+    """Pay-per-call x402 v2 concurrent batch extraction for up to 10 URLs ($0.05 USDC on Base)."""
+    description = (
+        "SSRF-safe concurrent Web-to-Clean-Markdown extraction for up to 10 URLs. "
+        "$0.05 USDC per batch call on Base via x402."
+    )
+    bazaar_spec = build_batch_bazaar_spec()
+    tags = ["batch", "markdown", "web", "extract", "llm", "agent"]
+    verified, requirements, challenge = await _verify_x402_or_challenge(
+        request,
+        path="/v1/x402/extract/batch",
+        method="POST",
+        description=description,
+        amount_atomic=X402_BATCH_PRICE_ATOMIC,
+        bazaar_spec=bazaar_spec,
+        tags=tags,
+    )
+    if challenge is not None:
+        return challenge
+    assert verified is not None and requirements is not None
+
+    try:
+        raw_body = await request.json()
+        body = raw_body if isinstance(raw_body, dict) else {}
+    except Exception:
+        body = {}
+
+    urls = body.get("urls")
+    if not isinstance(urls, list) or not (1 <= len(urls) <= 10) or not all(isinstance(u, str) and u.strip() for u in urls):
+        raise HTTPException(status_code=400, detail="Body 'urls' must be a list of 1 to 10 non-empty URL strings")
+
+    include_links = bool(body.get("include_links", True))
+    extract_links = bool(body.get("extract_links", False))
+    raw_max_chars = body.get("max_chars")
+    max_chars: int | None = None
+    if raw_max_chars is not None:
+        try:
+            parsed_max = int(raw_max_chars)
+            if 100 <= parsed_max <= 500000:
+                max_chars = parsed_max
+        except (TypeError, ValueError):
+            max_chars = None
+
+    async def _fetch_one(target_url: str) -> dict[str, Any]:
+        extract_kwargs: dict[str, Any] = {"include_links": include_links}
+        if extract_links:
+            extract_kwargs["extract_links"] = True
+        if max_chars is not None:
+            extract_kwargs["max_chars"] = max_chars
+        try:
+            doc = await extract_url(target_url, **extract_kwargs)
+            item: dict[str, Any] = {
+                "ok": True,
+                "url": doc.url,
+                "title": doc.title,
+                "description": doc.description,
+                "markdown": doc.markdown,
+                "word_count": doc.word_count,
+                "char_count": doc.char_count,
+            }
+            if extract_links:
+                item["links"] = list(doc.links)
+            return item
+        except ExtractionError as exc:
+            return {"ok": False, "url": target_url, "error": str(exc)}
+        except Exception as exc:
+            return {"ok": False, "url": target_url, "error": f"Upstream fetch failed: {type(exc).__name__}"}
+
+    results = await asyncio.gather(*(_fetch_one(u) for u in urls))
+    succeeded = sum(1 for r in results if r["ok"])
+    if succeeded == 0:
+        raise HTTPException(status_code=400, detail={"error": "all_urls_failed", "results": results})
+
+    return await _settle_and_build_x402_response(
+        request,
+        path="/v1/x402/extract/batch",
+        method="POST",
+        description=description,
+        verified=verified,
+        requirements=requirements,
+        amount_atomic=X402_BATCH_PRICE_ATOMIC,
+        body={
+            "total": len(urls),
+            "succeeded": succeeded,
+            "failed": len(urls) - succeeded,
+            "results": results,
+        },
+        bazaar_spec=bazaar_spec,
+        tags=tags,
     )
 
 
@@ -865,3 +1140,160 @@ async def mcp_endpoint(
             return _mcp_err(req_id, -32000, json.dumps(exc.detail, ensure_ascii=False) if isinstance(exc.detail, dict) else str(exc.detail))
 
     return _mcp_err(req_id, -32602, f"Unknown tool: {tool_name}")
+
+
+def custom_openapi() -> dict[str, Any]:
+    if app.openapi_schema:
+        return app.openapi_schema
+
+    schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+    )
+    schema["info"]["x-guidance"] = (
+        "Neon Developer API extracts clean LLM-ready Markdown and structured outbound links from public URLs "
+        "with SSRF protection. Pay-per-call x402 v2 endpoints on Base (eip155:8453 USDC): "
+        "GET/POST /v1/x402/extract ($0.01), GET /v1/x402/links ($0.005), and POST /v1/x402/extract/batch "
+        "($0.05 for up to 10 URLs). Prepaid API keys (20 free trial credits via POST /v1/keys/free, "
+        "1,000 credits per 1 USDC via POST /v1/billing/redeem) and MCP (POST /mcp) are also available."
+    )
+    schema["servers"] = [{"url": PERMANENT_PUBLIC_URL or "https://neon-api.austneo.workers.dev"}]
+
+    extract_200_schema = {
+        "type": "object",
+        "properties": {
+            "url": {"type": "string", "format": "uri"},
+            "title": {"type": "string"},
+            "description": {"type": "string"},
+            "markdown": {"type": "string"},
+            "word_count": {"type": "integer"},
+            "char_count": {"type": "integer"},
+            "links": {"type": "array", "items": {"type": "object"}},
+            "payment": {"type": "object"},
+        },
+        "required": ["url", "markdown", "word_count", "char_count", "payment"],
+    }
+    links_200_schema = {
+        "type": "object",
+        "properties": {
+            "url": {"type": "string", "format": "uri"},
+            "title": {"type": "string"},
+            "description": {"type": "string"},
+            "link_count": {"type": "integer"},
+            "links": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string"},
+                        "url": {"type": "string", "format": "uri"},
+                    },
+                    "required": ["text", "url"],
+                },
+            },
+            "payment": {"type": "object"},
+        },
+        "required": ["url", "link_count", "links", "payment"],
+    }
+    batch_200_schema = {
+        "type": "object",
+        "properties": {
+            "total": {"type": "integer"},
+            "succeeded": {"type": "integer"},
+            "failed": {"type": "integer"},
+            "results": {"type": "array", "items": {"type": "object"}},
+            "payment": {"type": "object"},
+        },
+        "required": ["total", "succeeded", "failed", "results", "payment"],
+    }
+
+    paid_configs: dict[tuple[str, str], dict[str, Any]] = {
+        ("/v1/x402/extract", "get"): {
+            "amount": f"{int(X402_PRICE_ATOMIC) / 1_000_000:.6f}",
+            "response_schema": extract_200_schema,
+        },
+        ("/v1/x402/extract", "post"): {
+            "amount": f"{int(X402_PRICE_ATOMIC) / 1_000_000:.6f}",
+            "response_schema": extract_200_schema,
+            "request_body": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "url": {"type": "string", "format": "uri", "description": "Public http/https URL"},
+                                "include_links": {"type": "boolean", "default": True},
+                                "extract_links": {"type": "boolean", "default": False},
+                                "max_chars": {"type": "integer", "minimum": 100, "maximum": 500000},
+                            },
+                            "required": ["url"],
+                        }
+                    }
+                },
+            },
+        },
+        ("/v1/x402/links", "get"): {
+            "amount": f"{int(X402_LINKS_PRICE_ATOMIC) / 1_000_000:.6f}",
+            "response_schema": links_200_schema,
+        },
+        ("/v1/x402/extract/batch", "post"): {
+            "amount": f"{int(X402_BATCH_PRICE_ATOMIC) / 1_000_000:.6f}",
+            "response_schema": batch_200_schema,
+            "request_body": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "urls": {
+                                    "type": "array",
+                                    "items": {"type": "string", "format": "uri"},
+                                    "minItems": 1,
+                                    "maxItems": 10,
+                                },
+                                "include_links": {"type": "boolean", "default": True},
+                                "extract_links": {"type": "boolean", "default": False},
+                                "max_chars": {"type": "integer", "minimum": 100, "maximum": 500000},
+                            },
+                            "required": ["urls"],
+                        }
+                    }
+                },
+            },
+        },
+    }
+
+    http_methods = {"get", "post", "put", "patch", "delete"}
+    for path, path_item in schema.get("paths", {}).items():
+        if not isinstance(path_item, dict):
+            continue
+        for method, op in path_item.items():
+            m = method.lower()
+            if m not in http_methods or not isinstance(op, dict):
+                continue
+            cfg = paid_configs.get((path, m))
+            if cfg is None:
+                op["security"] = []
+                continue
+            op["x-payment-info"] = {
+                "price": {"mode": "fixed", "currency": "USD", "amount": cfg["amount"]},
+                "protocols": [{"x402": {}}],
+            }
+            if "request_body" in cfg:
+                op["requestBody"] = cfg["request_body"]
+            responses = op.setdefault("responses", {})
+            responses["200"] = {
+                "description": "Successful response",
+                "content": {"application/json": {"schema": cfg["response_schema"]}},
+            }
+            responses["402"] = {"description": "Payment Required"}
+
+    app.openapi_schema = schema
+    return app.openapi_schema
+
+
+app.openapi = custom_openapi  # type: ignore[method-assign]

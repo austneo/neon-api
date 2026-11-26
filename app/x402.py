@@ -11,7 +11,9 @@ import httpx
 
 from .config import (
     RECEIVER_ADDRESS_CHECKSUM,
+    X402_BATCH_PRICE_ATOMIC,
     X402_FACILITATOR_URLS,
+    X402_LINKS_PRICE_ATOMIC,
     X402_PRICE_ATOMIC,
 )
 
@@ -81,15 +83,7 @@ def build_payment_requirements(
     }
 
 
-def build_payment_required_payload(
-    resource_url: str,
-    description: str,
-    method: str = "GET",
-    error: str = "PAYMENT-SIGNATURE header is required",
-    amount_atomic: str = X402_PRICE_ATOMIC,
-    pay_to: str = RECEIVER_ADDRESS_CHECKSUM,
-) -> dict[str, Any]:
-    """Build spec-compliant x402 v2 PaymentRequired payload with Bazaar metadata."""
+def _default_bazaar_spec(method: str) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     upper_method = method.upper()
     if upper_method == "POST":
         input_info: dict[str, Any] = {
@@ -156,6 +150,125 @@ def build_payment_required_payload(
             "transaction": "0x...",
         },
     }
+    return input_info, input_schema, output_example
+
+
+def build_links_bazaar_spec() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Bazaar input/output metadata for GET /v1/x402/links."""
+    input_info: dict[str, Any] = {
+        "type": "http",
+        "method": "GET",
+        "queryParams": {"url": "https://example.com"},
+    }
+    input_schema: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "type": {"type": "string", "const": "http"},
+            "method": {"type": "string", "enum": ["GET", "HEAD"]},
+            "queryParams": {
+                "type": "object",
+                "properties": {"url": {"type": "string", "format": "uri"}},
+                "required": ["url"],
+            },
+        },
+        "required": ["type", "method"],
+    }
+    output_example = {
+        "url": "https://example.com",
+        "title": "Example Domain",
+        "description": "",
+        "link_count": 1,
+        "links": [{"text": "More information...", "url": "https://www.iana.org/domains/example"}],
+        "payment": {
+            "protocol": "x402",
+            "network": BASE_CAIP2,
+            "amount_usdc": 0.005,
+            "transaction": "0x...",
+        },
+    }
+    return input_info, input_schema, output_example
+
+
+def build_batch_bazaar_spec() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Bazaar input/output metadata for POST /v1/x402/extract/batch."""
+    input_info: dict[str, Any] = {
+        "type": "http",
+        "method": "POST",
+        "bodyType": "json",
+        "body": {
+            "urls": ["https://example.com"],
+            "include_links": True,
+            "extract_links": False,
+            "max_chars": 20000,
+        },
+    }
+    input_schema: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "type": {"type": "string", "const": "http"},
+            "method": {"type": "string", "const": "POST"},
+            "bodyType": {"type": "string", "const": "json"},
+            "body": {
+                "type": "object",
+                "properties": {
+                    "urls": {
+                        "type": "array",
+                        "items": {"type": "string", "format": "uri"},
+                        "minItems": 1,
+                        "maxItems": 10,
+                    },
+                    "include_links": {"type": "boolean"},
+                    "extract_links": {"type": "boolean"},
+                    "max_chars": {"type": "integer", "minimum": 100, "maximum": 500000},
+                },
+                "required": ["urls"],
+            },
+        },
+        "required": ["type", "method"],
+    }
+    output_example = {
+        "total": 1,
+        "succeeded": 1,
+        "failed": 0,
+        "results": [
+            {
+                "ok": True,
+                "url": "https://example.com",
+                "title": "Example Domain",
+                "description": "",
+                "markdown": "# Example Domain\n\n...",
+                "word_count": 28,
+                "char_count": 162,
+            }
+        ],
+        "payment": {
+            "protocol": "x402",
+            "network": BASE_CAIP2,
+            "amount_usdc": 0.05,
+            "transaction": "0x...",
+        },
+    }
+    return input_info, input_schema, output_example
+
+
+def build_payment_required_payload(
+    resource_url: str,
+    description: str,
+    method: str = "GET",
+    error: str = "PAYMENT-SIGNATURE header is required",
+    amount_atomic: str = X402_PRICE_ATOMIC,
+    pay_to: str = RECEIVER_ADDRESS_CHECKSUM,
+    input_info: dict[str, Any] | None = None,
+    input_schema: dict[str, Any] | None = None,
+    output_example: dict[str, Any] | None = None,
+    tags: list[str] | None = None,
+) -> dict[str, Any]:
+    """Build spec-compliant x402 v2 PaymentRequired payload with Bazaar metadata."""
+    default_info, default_schema, default_output = _default_bazaar_spec(method)
+    eff_input_info = input_info if input_info is not None else default_info
+    eff_input_schema = input_schema if input_schema is not None else default_schema
+    eff_output_example = output_example if output_example is not None else default_output
+    eff_tags = tags if tags is not None else ["markdown", "web", "extract", "scraping", "llm", "agent"]
 
     return {
         "x402Version": 2,
@@ -165,20 +278,20 @@ def build_payment_required_payload(
             "description": description,
             "mimeType": "application/json",
             "serviceName": "Neon Web-to-Markdown API",
-            "tags": ["markdown", "web", "extract", "scraping", "llm", "agent"],
+            "tags": eff_tags,
         },
         "accepts": [build_payment_requirements(amount_atomic=amount_atomic, pay_to=pay_to)],
         "extensions": {
             "bazaar": {
                 "info": {
-                    "input": input_info,
-                    "output": {"type": "json", "example": output_example},
+                    "input": eff_input_info,
+                    "output": {"type": "json", "example": eff_output_example},
                 },
                 "schema": {
                     "$schema": "https://json-schema.org/draft/2020-12/schema",
                     "type": "object",
                     "properties": {
-                        "input": input_schema,
+                        "input": eff_input_schema,
                         "output": {
                             "type": "object",
                             "properties": {
@@ -192,6 +305,74 @@ def build_payment_required_payload(
                 },
             }
         },
+    }
+
+
+def build_well_known_x402_manifest(base_url: str) -> dict[str, Any]:
+    """Build /.well-known/x402 discovery manifest listing all paid x402 endpoints."""
+    base = base_url.rstrip("/")
+    ext_get = build_payment_required_payload(
+        resource_url=f"{base}/v1/x402/extract",
+        description="SSRF-safe Web-to-Clean-Markdown extraction (GET).",
+        method="GET",
+        amount_atomic=X402_PRICE_ATOMIC,
+    )
+    ext_post = build_payment_required_payload(
+        resource_url=f"{base}/v1/x402/extract",
+        description="SSRF-safe Web-to-Clean-Markdown extraction (POST).",
+        method="POST",
+        amount_atomic=X402_PRICE_ATOMIC,
+    )
+    links_in, links_schema, links_out = build_links_bazaar_spec()
+    links_payload = build_payment_required_payload(
+        resource_url=f"{base}/v1/x402/links",
+        description="SSRF-safe structured outbound link extraction ($0.005 USDC).",
+        method="GET",
+        amount_atomic=X402_LINKS_PRICE_ATOMIC,
+        input_info=links_in,
+        input_schema=links_schema,
+        output_example=links_out,
+        tags=["links", "crawler", "web", "scraping", "llm", "agent"],
+    )
+    batch_in, batch_schema, batch_out = build_batch_bazaar_spec()
+    batch_payload = build_payment_required_payload(
+        resource_url=f"{base}/v1/x402/extract/batch",
+        description="SSRF-safe concurrent batch Web-to-Markdown extraction for up to 10 URLs ($0.05 USDC).",
+        method="POST",
+        amount_atomic=X402_BATCH_PRICE_ATOMIC,
+        input_info=batch_in,
+        input_schema=batch_schema,
+        output_example=batch_out,
+        tags=["batch", "markdown", "web", "extract", "llm", "agent"],
+    )
+
+    entries = [
+        ("/v1/x402/extract", "GET", ext_get, X402_PRICE_ATOMIC),
+        ("/v1/x402/extract", "POST", ext_post, X402_PRICE_ATOMIC),
+        ("/v1/x402/links", "GET", links_payload, X402_LINKS_PRICE_ATOMIC),
+        ("/v1/x402/extract/batch", "POST", batch_payload, X402_BATCH_PRICE_ATOMIC),
+    ]
+    services = []
+    for path, method, payload, atomic in entries:
+        req = dict(payload["accepts"][0])
+        req["priceUsd"] = round(int(atomic) / 1_000_000, 6)
+        services.append(
+            {
+                "path": path,
+                "method": method,
+                "url": f"{base}{path}",
+                "description": payload["resource"]["description"],
+                "enabled": True,
+                "payment": req,
+                "extensions": payload["extensions"],
+            }
+        )
+    return {
+        "x402Version": 2,
+        "service": "neon-api",
+        "name": "Neon Web-to-Markdown API",
+        "baseUrl": base,
+        "services": services,
     }
 
 

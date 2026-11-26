@@ -670,3 +670,139 @@ def test_x402_ssrf_rejected_before_settlement(client: TestClient):
         )
     assert res.status_code == 400
     assert settle_called is False
+
+
+def test_well_known_x402_mcp_and_openapi_discovery_compliance(client: TestClient):
+    headers = {"Host": "neon-api.austneo.workers.dev", "X-Forwarded-Proto": "https"}
+    wk_x402 = client.get("/.well-known/x402", headers=headers)
+    assert wk_x402.status_code == 200
+    x402_doc = wk_x402.json()
+    assert x402_doc["x402Version"] == 2
+    assert x402_doc["baseUrl"] == "https://neon-api.austneo.workers.dev"
+    paths_methods = {(s["path"], s["method"]): s["payment"]["amount"] for s in x402_doc["services"]}
+    assert paths_methods == {
+        ("/v1/x402/extract", "GET"): config.X402_PRICE_ATOMIC,
+        ("/v1/x402/extract", "POST"): config.X402_PRICE_ATOMIC,
+        ("/v1/x402/links", "GET"): config.X402_LINKS_PRICE_ATOMIC,
+        ("/v1/x402/extract/batch", "POST"): config.X402_BATCH_PRICE_ATOMIC,
+    }
+
+    wk_mcp = client.get("/.well-known/mcp.json", headers=headers)
+    assert wk_mcp.status_code == 200
+    mcp_doc = wk_mcp.json()
+    assert mcp_doc["url"] == "https://neon-api.austneo.workers.dev/mcp"
+    assert len(mcp_doc["tools"]) >= 5
+
+    openapi_res = client.get("/openapi.json")
+    assert openapi_res.status_code == 200
+    spec = openapi_res.json()
+    assert spec["info"].get("x-guidance")
+
+    paid_ops = [
+        ("/v1/x402/extract", "get", "0.010000", False),
+        ("/v1/x402/extract", "post", "0.010000", True),
+        ("/v1/x402/links", "get", "0.005000", False),
+        ("/v1/x402/extract/batch", "post", "0.050000", True),
+    ]
+    for path, method, expected_amount, needs_body in paid_ops:
+        op = spec["paths"][path][method]
+        assert op["x-payment-info"]["price"]["amount"] == expected_amount
+        assert op["x-payment-info"]["protocols"] == [{"x402": {}}]
+        assert "402" in op["responses"]
+        assert "application/json" in op["responses"]["200"]["content"]
+        if needs_body:
+            assert "application/json" in op["requestBody"]["content"]
+
+    paid_set = {(p, m) for p, m, _, _ in paid_ops}
+    for path, path_item in spec["paths"].items():
+        for method, op in path_item.items():
+            if not isinstance(op, dict) or method.lower() not in {"get", "post", "put", "patch", "delete"}:
+                continue
+            if (path, method.lower()) not in paid_set:
+                assert op.get("security") == [], f"Non-x402 route {method.upper()} {path} missing security: []"
+
+
+def test_x402_links_and_batch_paid_and_ssrf_guard(client: TestClient):
+    import base64
+    import json
+    from app.x402 import encode_b64_json
+
+    headers = {"Host": "neon-api.austneo.workers.dev", "X-Forwarded-Proto": "https"}
+
+    # 1. Unpaid challenges
+    links_402 = client.get("/v1/x402/links?url=https://example.com", headers=headers)
+    assert links_402.status_code == 402
+    links_req = json.loads(base64.b64decode(links_402.headers["payment-required"]).decode("utf-8"))
+    assert links_req["accepts"][0]["amount"] == config.X402_LINKS_PRICE_ATOMIC
+
+    # Empty POST body must still return 402 (never 422) for scanner probes
+    batch_402 = client.post("/v1/x402/extract/batch", headers=headers)
+    assert batch_402.status_code == 402
+    batch_req = json.loads(base64.b64decode(batch_402.headers["payment-required"]).decode("utf-8"))
+    assert batch_req["accepts"][0]["amount"] == config.X402_BATCH_PRICE_ATOMIC
+
+    sig_header = encode_b64_json({"x402Version": 2, "payload": {"signature": "0x" + "11" * 65}})
+    tx_hash = "0x" + "88" * 32
+    settle_count = 0
+
+    async def fake_post(url: str, payload: dict):
+        nonlocal settle_count
+        if url.endswith("/verify"):
+            return 200, {"isValid": True, "payer": "0x" + "22" * 20}
+        if url.endswith("/settle"):
+            settle_count += 1
+            return 200, {"success": True, "transaction": tx_hash, "network": "eip155:8453", "payer": "0x" + "22" * 20}
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    # 2. Paid links extraction
+    fake_doc = ExtractedDocument(
+        url="https://example.com",
+        title="Example",
+        description="",
+        markdown="# Example",
+        word_count=1,
+        char_count=9,
+        links=({"text": "Docs", "url": "https://example.com/docs"},),
+    )
+    with (
+        patch("app.x402.default_facilitator_post", new=fake_post),
+        patch("app.main.extract_url", new=AsyncMock(return_value=fake_doc)),
+    ):
+        links_ok = client.get(
+            "/v1/x402/links?url=https://example.com",
+            headers={**headers, "PAYMENT-SIGNATURE": sig_header},
+        )
+    assert links_ok.status_code == 200
+    assert links_ok.json()["link_count"] == 1
+    assert links_ok.json()["payment"]["amount_usdc"] == 0.005
+    assert settle_count == 1
+
+    # 3. Paid batch extraction
+    with (
+        patch("app.x402.default_facilitator_post", new=fake_post),
+        patch("app.main.extract_url", new=AsyncMock(return_value=fake_doc)),
+    ):
+        batch_ok = client.post(
+            "/v1/x402/extract/batch",
+            headers={**headers, "PAYMENT-SIGNATURE": sig_header},
+            json={"urls": ["https://example.com", "https://iana.org"]},
+        )
+    assert batch_ok.status_code == 200
+    assert batch_ok.json()["succeeded"] == 2
+    assert batch_ok.json()["payment"]["amount_usdc"] == 0.05
+    assert settle_count == 2
+
+    # 4. SSRF-blocked links & batch must return 400 BEFORE settlement
+    with patch("app.x402.default_facilitator_post", new=fake_post):
+        links_ssrf = client.get(
+            "/v1/x402/links?url=http://127.0.0.1:8080/secret",
+            headers={**headers, "PAYMENT-SIGNATURE": sig_header},
+        )
+        batch_ssrf = client.post(
+            "/v1/x402/extract/batch",
+            headers={**headers, "PAYMENT-SIGNATURE": sig_header},
+            json={"urls": ["http://127.0.0.1:8080/secret"]},
+        )
+    assert links_ssrf.status_code == 400
+    assert batch_ssrf.status_code == 400
+    assert settle_count == 2

@@ -32,8 +32,9 @@ RpcCaller = Callable[[str, str, list[Any]], Awaitable[Any]]
 
 async def default_rpc_call(rpc_url: str, method: str, params: list[Any]) -> Any:
     payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+    headers = {"User-Agent": "neon-api/0.1", "Content-Type": "application/json"}
     async with httpx.AsyncClient(timeout=15.0) as client:
-        resp = await client.post(rpc_url, json=payload)
+        resp = await client.post(rpc_url, json=payload, headers=headers)
         resp.raise_for_status()
         data = resp.json()
     if "error" in data and data["error"]:

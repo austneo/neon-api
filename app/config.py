@@ -36,6 +36,8 @@ RECEIVER_ADDRESS = RECEIVER_ADDRESS_CHECKSUM.lower()
 
 PERMANENT_PUBLIC_URL = os.environ.get("NEON_PERMANENT_PUBLIC_URL", "").strip().rstrip("/")
 X402_PRICE_ATOMIC = os.environ.get("NEON_X402_PRICE_ATOMIC", "10000")  # $0.01 USDC (6 decimals)
+X402_LINKS_PRICE_ATOMIC = os.environ.get("NEON_X402_LINKS_PRICE_ATOMIC", "5000")  # $0.005 USDC
+X402_BATCH_PRICE_ATOMIC = os.environ.get("NEON_X402_BATCH_PRICE_ATOMIC", "50000")  # $0.05 USDC
 X402_FACILITATOR_URLS = _dedup_urls(
     *(
         os.environ.get(
