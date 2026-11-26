@@ -33,7 +33,13 @@ def _padded_addr(addr: str) -> str:
 
 
 def test_health_and_billing_info(client: TestClient):
-    idx = client.get("/")
+    idx_html = client.get("/")
+    assert idx_html.status_code == 200
+    assert "text/html" in idx_html.headers.get("content-type", "")
+    assert "<title>" in idx_html.text
+    assert 'name="description"' in idx_html.text
+
+    idx = client.get("/", headers={"Accept": "application/json"})
     assert idx.status_code == 200
     assert idx.json()["service"] == "neon-api"
 

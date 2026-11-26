@@ -5,6 +5,11 @@ Web-to-Clean-Markdown extraction API with permissionless **Base / Polygon USDC**
 - **Live Endpoint**: `https://neon-api.austneo.workers.dev`
 - **USDC Receiver (Base / Polygon)**: `0xfBF41F92592B3FF315983E41f058C21A1e8B8d48`
 
+## Live Marketplace Listings
+- **PayAPI Market (Settlement-Verified)**: `https://payapi.market/api/neon-web-to-markdown-api`
+- **402 Index**: `https://402index.io` (`neon-api.austneo.workers.dev`, domain verified, 3 paid endpoints)
+- **x402scan / x402dash / true402.dev**: Listed and active
+
 ## Payment Options
 
 1. **Native x402 v2 (No API Key Required)**

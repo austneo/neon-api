@@ -239,9 +239,10 @@ def _require_key(x_api_key: str | None) -> str:
 
 @app.get("/", response_model=None)
 async def root(request: Request) -> JSONResponse | HTMLResponse:
-    accept = request.headers.get("accept", "")
+    accept_lower = request.headers.get("accept", "").lower()
     base = _public_base_url(request)
-    if "text/html" in accept and "application/json" not in accept:
+    wants_json = "application/json" in accept_lower and "text/html" not in accept_lower
+    if not wants_json:
         html = f"""<!doctype html>
 <html lang="en">
 <head>
@@ -274,7 +275,7 @@ async def root(request: Request) -> JSONResponse | HTMLResponse:
 curl -s -X POST {base}/v1/extract -H 'X-API-Key: YOUR_KEY' -H 'Content-Type: application/json' -d '{{"url": "https://example.com"}}'
 curl -s -X POST {base}/v1/billing/redeem -H 'X-API-Key: YOUR_KEY' -H 'Content-Type: application/json' -d '{{"chain": "base", "tx_hash": "0x..."}}'</pre>
   </div>
-  <p>Agent Specs: <a href="/llms.txt">/llms.txt</a> &middot; <a href="/skill.md">/skill.md</a> &middot; <a href="/.well-known/x402">/.well-known/x402</a> &middot; <a href="/.well-known/mcp.json">/.well-known/mcp.json</a> &middot; <a href="/.well-known/agent.json">/.well-known/agent.json</a> &middot; <a href="/docs">/docs</a></p>
+  <p>Agent Specs: <a href="/llms.txt">/llms.txt</a> &middot; <a href="/skill.md">/skill.md</a> &middot; <a href="/.well-known/x402">/.well-known/x402</a> &middot; <a href="/.well-known/mcp.json">/.well-known/mcp.json</a> &middot; <a href="/.well-known/agent.json">/.well-known/agent.json</a> &middot; <a href="/docs">/docs</a> &middot; <a href="https://payapi.market/api/neon-web-to-markdown-api">PayAPI Market (Settlement-Verified)</a></p>
 </body>
 </html>"""
         return HTMLResponse(content=html)
