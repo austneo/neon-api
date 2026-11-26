@@ -228,6 +228,7 @@ async def root(request: Request) -> JSONResponse | HTMLResponse:
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Neon Developer API — Web-to-Markdown + USDC Billing</title>
+  <meta name="description" content="SSRF-safe Web-to-Clean-Markdown extraction API for AI agents and developers. Permissionless Base/Polygon USDC billing and native x402 v2." />
   <style>
     body {{ font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; max-width: 760px; margin: 40px auto; padding: 0 20px; line-height: 1.6; color: #111827; background: #f9fafb; }}
     .card {{ background: #fff; border: 1px solid #e5e7eb; border-radius: 10px; padding: 20px; margin: 16px 0; }}
@@ -289,10 +290,17 @@ curl -s -X POST {base}/v1/billing/redeem -H 'X-API-Key: YOUR_KEY' -H 'Content-Ty
     )
 
 
+@app.get("/.well-known/x402.json")
 @app.get("/.well-known/x402")
 async def well_known_x402(request: Request) -> dict[str, Any]:
     """Machine-readable x402 service discovery manifest."""
     return build_well_known_x402_manifest(_public_base_url(request))
+
+
+@app.get("/robots.txt", response_class=PlainTextResponse)
+async def robots_txt() -> PlainTextResponse:
+    """Allow search engines and AI agents to index public docs and discovery routes."""
+    return PlainTextResponse("User-agent: *\nAllow: /\n", status_code=200)
 
 
 @app.get("/.well-known/402index-verify.txt", response_class=PlainTextResponse)

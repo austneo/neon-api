@@ -702,6 +702,18 @@ def test_well_known_x402_mcp_and_openapi_discovery_compliance(client: TestClient
     assert mcp_doc["url"] == "https://neon-api.austneo.workers.dev/mcp"
     assert len(mcp_doc["tools"]) >= 5
 
+    wk_x402_json = client.get("/.well-known/x402.json", headers=headers)
+    assert wk_x402_json.status_code == 200
+    assert wk_x402_json.json() == x402_doc
+
+    robots_res = client.get("/robots.txt", headers=headers)
+    assert robots_res.status_code == 200
+    assert "Allow: /" in robots_res.text
+
+    html_root = client.get("/", headers={**headers, "Accept": "text/html"})
+    assert html_root.status_code == 200
+    assert '<meta name="description"' in html_root.text
+
     openapi_res = client.get("/openapi.json")
     assert openapi_res.status_code == 200
     spec = openapi_res.json()
