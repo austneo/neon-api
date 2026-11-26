@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
@@ -70,8 +71,26 @@ app = FastAPI(
     title="Neon Developer API",
     description="Web-to-Clean-Markdown extraction API with permissionless Base/Polygon USDC TxHash billing.",
     version="0.1.0",
+    docs_url=None,
     lifespan=lifespan,
 )
+
+
+@app.get("/docs", include_in_schema=False)
+async def custom_swagger_ui_html() -> HTMLResponse:
+    """Serve Swagger UI with explicit SEO title and meta description."""
+    resp = get_swagger_ui_html(
+        openapi_url=app.openapi_url or "/openapi.json",
+        title="Neon Developer API — Web-to-Markdown & x402 USDC API Docs",
+    )
+    body = resp.body.decode("utf-8")
+    meta_tag = (
+        '<meta name="description" content="Interactive OpenAPI documentation for Neon Developer API — '
+        'SSRF-safe Web-to-Clean-Markdown extraction with permissionless Base/Polygon USDC billing and native x402 v2." />'
+    )
+    if "</head>" in body and 'name="description"' not in body:
+        body = body.replace("</head>", f"    {meta_tag}\n    </head>", 1)
+    return HTMLResponse(content=body, status_code=200)
 
 
 class RedeemRequest(BaseModel):

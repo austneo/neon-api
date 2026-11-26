@@ -714,6 +714,11 @@ def test_well_known_x402_mcp_and_openapi_discovery_compliance(client: TestClient
     assert html_root.status_code == 200
     assert '<meta name="description"' in html_root.text
 
+    docs_res = client.get("/docs", headers=headers)
+    assert docs_res.status_code == 200
+    assert "<title>" in docs_res.text
+    assert '<meta name="description"' in docs_res.text
+
     openapi_res = client.get("/openapi.json")
     assert openapi_res.status_code == 200
     spec = openapi_res.json()
