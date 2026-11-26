@@ -42,7 +42,7 @@ X402_FACILITATOR_URLS = _dedup_urls(
     *(
         os.environ.get(
             "NEON_X402_FACILITATORS",
-            "https://facilitator.openx402.ai,https://facilitator.payai.network,https://api.x402.unibase.com/v2",
+            "https://facilitator.payai.network,https://api.x402.unibase.com/v2",
         ).split(",")
     )
 )

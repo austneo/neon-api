@@ -529,6 +529,7 @@ def test_x402_challenge_get_and_post_conformance(client: TestClient):
     assert accept["scheme"] == "exact"
     assert accept["network"] == "eip155:8453"
     assert accept["amount"] == config.X402_PRICE_ATOMIC
+    assert "maxAmountRequired" not in accept
     assert accept["asset"] == "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
     assert accept["payTo"] == config.RECEIVER_ADDRESS_CHECKSUM
     assert accept["extra"] == {"name": "USD Coin", "version": "2"}
@@ -966,3 +967,35 @@ def test_a2a_agent_card_alias_and_x402_head_post_links(client: TestClient):
     assert post_links_ok.status_code == 200
     assert post_links_ok.json()["link_count"] == 1
     assert post_links_ok.json()["payment"]["transaction"] == tx_hash
+
+
+def test_x402_v2_clean_requirements_and_unregistered_failover():
+    import asyncio
+    from app.x402 import build_payment_requirements, encode_b64_json, verify_payment
+
+    reqs = build_payment_requirements()
+    assert reqs["amount"] == config.X402_PRICE_ATOMIC
+    assert "maxAmountRequired" not in reqs
+
+    sig_header = encode_b64_json({"x402Version": 2, "payload": {"signature": "0x" + "11" * 65}})
+    forwarded_reqs: list[dict] = []
+
+    async def failover_post(url: str, payload: dict):
+        forwarded_reqs.append(payload["paymentRequirements"])
+        if url.startswith("https://unreg.test"):
+            return 200, {"isValid": False, "invalidReason": "address_not_registered"}
+        return 200, {"isValid": True, "payer": "0x" + "22" * 20}
+
+    verified = asyncio.run(
+        verify_payment(
+            sig_header,
+            {**reqs, "maxAmountRequired": config.X402_PRICE_ATOMIC},
+            facilitator_urls=("https://unreg.test", "https://payai.test"),
+            post_fn=failover_post,
+        )
+    )
+    assert verified["facilitator_url"] == "https://payai.test"
+    assert len(forwarded_reqs) == 2
+    for req in forwarded_reqs:
+        assert req["amount"] == config.X402_PRICE_ATOMIC
+        assert "maxAmountRequired" not in req

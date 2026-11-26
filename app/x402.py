@@ -75,7 +75,6 @@ def build_payment_requirements(
         "scheme": "exact",
         "network": BASE_CAIP2,
         "amount": str(amount_atomic),
-        "maxAmountRequired": str(amount_atomic),
         "asset": BASE_USDC_CHECKSUM,
         "payTo": pay_to,
         "maxTimeoutSeconds": 120,
@@ -106,7 +105,7 @@ def adapt_requirements_for_version(
         if description:
             adapted["description"] = description
         return adapted
-    return dict(requirements)
+    return {k: v for k, v in requirements.items() if k != "maxAmountRequired"}
 
 
 def _default_bazaar_spec(method: str) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
@@ -457,7 +456,14 @@ async def verify_payment(
     urls = facilitator_urls or X402_FACILITATOR_URLS
     infra_errors: list[str] = []
     compat_errors: list[str] = []
-    compat_keywords = ("unsupported", "version", "network")
+    compat_keywords = (
+        "unsupported",
+        "version",
+        "network",
+        "not_registered",
+        "not registered",
+        "invalid_payment_requirements",
+    )
 
     for fac_url in urls:
         endpoint = f"{fac_url.rstrip('/')}/verify"
