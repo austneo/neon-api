@@ -327,6 +327,7 @@ async def well_known_mcp(request: Request) -> dict[str, Any]:
     }
 
 
+@app.get("/.well-known/agent-card.json")
 @app.get("/.well-known/agent.json")
 async def agent_card(request: Request) -> dict[str, Any]:
     base = _public_base_url(request)
@@ -843,6 +844,48 @@ async def _handle_x402_extract(
     )
 
 
+def _x402_head_402_response(
+    request: Request,
+    *,
+    path: str,
+    description: str,
+    amount_atomic: str,
+    bazaar_spec: tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None = None,
+    tags: list[str] | None = None,
+) -> PlainTextResponse:
+    challenge = _x402_402_response(
+        _x402_resource_url(request, path),
+        description,
+        "GET",
+        amount_atomic=amount_atomic,
+        bazaar_spec=bazaar_spec,
+        tags=tags,
+    )
+    return PlainTextResponse(
+        content="",
+        status_code=402,
+        headers={
+            "PAYMENT-REQUIRED": challenge.headers["PAYMENT-REQUIRED"],
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+@app.head("/v1/x402/extract")
+async def x402_extract_head(request: Request) -> PlainTextResponse:
+    """HEAD probe support for x402 Web-to-Markdown endpoint (returns 402 + PAYMENT-REQUIRED)."""
+    return _x402_head_402_response(
+        request,
+        path="/v1/x402/extract",
+        description=(
+            "SSRF-safe Web-to-Clean-Markdown extraction for AI agents. "
+            "Returns clean Markdown, title, metadata, word count, and optional links. "
+            "$0.01 USDC per call on Base via x402."
+        ),
+        amount_atomic=X402_PRICE_ATOMIC,
+    )
+
+
 @app.get("/v1/x402/extract")
 async def x402_extract_get(
     request: Request,
@@ -889,12 +932,12 @@ async def x402_extract_post(request: Request) -> JSONResponse:
     )
 
 
-@app.get("/v1/x402/links")
-async def x402_links_get(
+async def _handle_x402_links(
     request: Request,
-    url: str = "https://example.com",
+    *,
+    method: str,
+    url: str,
 ) -> JSONResponse:
-    """Pay-per-call x402 v2 structured outbound link extractor ($0.005 USDC on Base)."""
     description = (
         "SSRF-safe structured outbound link extraction for AI agents. "
         "Returns deduplicated absolute HTTP/HTTPS links with anchor text. "
@@ -905,7 +948,7 @@ async def x402_links_get(
     verified, requirements, challenge = await _verify_x402_or_challenge(
         request,
         path="/v1/x402/links",
-        method="GET",
+        method=method,
         description=description,
         amount_atomic=X402_LINKS_PRICE_ATOMIC,
         bazaar_spec=bazaar_spec,
@@ -926,7 +969,7 @@ async def x402_links_get(
     return await _settle_and_build_x402_response(
         request,
         path="/v1/x402/links",
-        method="GET",
+        method=method,
         description=description,
         verified=verified,
         requirements=requirements,
@@ -941,6 +984,47 @@ async def x402_links_get(
         bazaar_spec=bazaar_spec,
         tags=tags,
     )
+
+
+@app.head("/v1/x402/links")
+async def x402_links_head(request: Request) -> PlainTextResponse:
+    """HEAD probe support for x402 outbound link extractor (returns 402 + PAYMENT-REQUIRED)."""
+    return _x402_head_402_response(
+        request,
+        path="/v1/x402/links",
+        description=(
+            "SSRF-safe structured outbound link extraction for AI agents. "
+            "Returns deduplicated absolute HTTP/HTTPS links with anchor text. "
+            "$0.005 USDC per call on Base via x402."
+        ),
+        amount_atomic=X402_LINKS_PRICE_ATOMIC,
+        bazaar_spec=build_links_bazaar_spec(),
+        tags=["links", "crawler", "web", "scraping", "llm", "agent"],
+    )
+
+
+@app.get("/v1/x402/links")
+async def x402_links_get(
+    request: Request,
+    url: str = "https://example.com",
+) -> JSONResponse:
+    """Pay-per-call x402 v2 structured outbound link extractor ($0.005 USDC on Base, GET)."""
+    return await _handle_x402_links(request, method="GET", url=url)
+
+
+@app.post("/v1/x402/links")
+async def x402_links_post(
+    request: Request,
+    url: str = "https://example.com",
+) -> JSONResponse:
+    """Pay-per-call x402 v2 structured outbound link extractor ($0.005 USDC on Base, POST)."""
+    try:
+        raw_body = await request.json()
+        body = raw_body if isinstance(raw_body, dict) else {}
+    except Exception:
+        body = {}
+    target_url = str(body.get("url") or url or "https://example.com")
+    return await _handle_x402_links(request, method="POST", url=target_url)
 
 
 @app.post("/v1/x402/extract/batch")
@@ -1275,6 +1359,24 @@ def custom_openapi() -> dict[str, Any]:
         ("/v1/x402/links", "get"): {
             "amount": f"{int(X402_LINKS_PRICE_ATOMIC) / 1_000_000:.6f}",
             "response_schema": links_200_schema,
+        },
+        ("/v1/x402/links", "post"): {
+            "amount": f"{int(X402_LINKS_PRICE_ATOMIC) / 1_000_000:.6f}",
+            "response_schema": links_200_schema,
+            "request_body": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "url": {"type": "string", "format": "uri", "description": "Public http/https URL"},
+                            },
+                            "required": ["url"],
+                        }
+                    }
+                },
+            },
         },
         ("/v1/x402/extract/batch", "post"): {
             "amount": f"{int(X402_BATCH_PRICE_ATOMIC) / 1_000_000:.6f}",

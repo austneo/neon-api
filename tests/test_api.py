@@ -702,6 +702,7 @@ def test_well_known_x402_mcp_and_openapi_discovery_compliance(client: TestClient
         ("/v1/x402/extract", "get", "0.010000", False),
         ("/v1/x402/extract", "post", "0.010000", True),
         ("/v1/x402/links", "get", "0.005000", False),
+        ("/v1/x402/links", "post", "0.005000", True),
         ("/v1/x402/extract/batch", "post", "0.050000", True),
     ]
     for path, method, expected_amount, needs_body in paid_ops:
@@ -896,3 +897,64 @@ def test_402index_verification_route(client: TestClient, tmp_path, monkeypatch):
     assert r_ok.status_code == 200
     assert r_ok.headers["content-type"].startswith("text/plain")
     assert r_ok.text == "deadbeef12345678"
+
+
+def test_a2a_agent_card_alias_and_x402_head_post_links(client: TestClient):
+    import base64
+    import json
+    from app.x402 import encode_b64_json
+
+    headers = {"Host": "neon-api.austneo.workers.dev", "X-Forwarded-Proto": "https"}
+    legacy = client.get("/.well-known/agent.json", headers=headers)
+    alias = client.get("/.well-known/agent-card.json", headers=headers)
+    assert legacy.status_code == 200
+    assert alias.status_code == 200
+    assert alias.json() == legacy.json()
+
+    head_ext = client.head("/v1/x402/extract?url=https://example.com", headers=headers)
+    assert head_ext.status_code == 402
+    assert "payment-required" in head_ext.headers
+    ext_req = json.loads(base64.b64decode(head_ext.headers["payment-required"]).decode("utf-8"))
+    assert ext_req["accepts"][0]["amount"] == config.X402_PRICE_ATOMIC
+
+    head_links = client.head("/v1/x402/links?url=https://example.com", headers=headers)
+    assert head_links.status_code == 402
+    assert "payment-required" in head_links.headers
+    links_req = json.loads(base64.b64decode(head_links.headers["payment-required"]).decode("utf-8"))
+    assert links_req["accepts"][0]["amount"] == config.X402_LINKS_PRICE_ATOMIC
+
+    post_links_402 = client.post("/v1/x402/links", headers=headers, json={"url": "https://example.com"})
+    assert post_links_402.status_code == 402
+    assert "payment-required" in post_links_402.headers
+
+    sig_header = encode_b64_json({"x402Version": 2, "payload": {"signature": "0x" + "11" * 65}})
+    tx_hash = "0x" + "aa" * 32
+    fake_doc = ExtractedDocument(
+        url="https://example.com",
+        title="Example",
+        description="",
+        markdown="# Example",
+        word_count=1,
+        char_count=9,
+        links=({"text": "Docs", "url": "https://example.com/docs"},),
+    )
+
+    async def fake_post(url: str, payload: dict):
+        if url.endswith("/verify"):
+            return 200, {"isValid": True, "payer": "0x" + "22" * 20}
+        if url.endswith("/settle"):
+            return 200, {"success": True, "transaction": tx_hash, "network": "eip155:8453", "payer": "0x" + "22" * 20}
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    with (
+        patch("app.x402.default_facilitator_post", new=fake_post),
+        patch("app.main.extract_url", new=AsyncMock(return_value=fake_doc)),
+    ):
+        post_links_ok = client.post(
+            "/v1/x402/links",
+            headers={**headers, "PAYMENT-SIGNATURE": sig_header},
+            json={"url": "https://example.com"},
+        )
+    assert post_links_ok.status_code == 200
+    assert post_links_ok.json()["link_count"] == 1
+    assert post_links_ok.json()["payment"]["transaction"] == tx_hash
