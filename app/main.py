@@ -42,6 +42,7 @@ from .x402 import (
     build_payment_required_payload,
     build_payment_requirements,
     build_well_known_x402_manifest,
+    build_well_known_x402_service_manifest,
     encode_b64_json,
     settle_payment,
     verify_payment,
@@ -288,6 +289,7 @@ curl -s -X POST {base}/v1/billing/redeem -H 'X-API-Key: YOUR_KEY' -H 'Content-Ty
             "llms_txt": "/llms.txt",
             "skill_md": "/skill.md",
             "well_known_x402": "/.well-known/x402",
+            "well_known_x402_service": "/.well-known/x402-service.json",
             "well_known_mcp": "/.well-known/mcp.json",
             "agent_card": "/.well-known/agent.json",
             "endpoints": {
@@ -314,6 +316,12 @@ curl -s -X POST {base}/v1/billing/redeem -H 'X-API-Key: YOUR_KEY' -H 'Content-Ty
 async def well_known_x402(request: Request) -> dict[str, Any]:
     """Machine-readable x402 service discovery manifest."""
     return build_well_known_x402_manifest(_public_base_url(request))
+
+
+@app.get("/.well-known/x402-service.json")
+async def well_known_x402_service(request: Request) -> dict[str, Any]:
+    """Machine-readable x402-service v1.0 manifest for true402 and compatible directories."""
+    return build_well_known_x402_service_manifest(_public_base_url(request))
 
 
 @app.get("/robots.txt", response_class=PlainTextResponse)
@@ -431,7 +439,7 @@ async def llms_txt(request: Request) -> str:
         f"7. Pay-per-call x402 (no API key, $0.01 USDC on Base): GET {base}/v1/x402/extract?url=https://example.com or POST {base}/v1/x402/extract\n"
         f"8. Pay-per-call x402 links ($0.005 USDC on Base): GET {base}/v1/x402/links?url=https://example.com\n"
         f"9. Pay-per-call x402 batch ($0.05 USDC on Base, up to 10 URLs): POST {base}/v1/x402/extract/batch\n"
-        f"10. Discovery manifests: GET {base}/.well-known/x402 | GET {base}/.well-known/mcp.json | GET {base}/openapi.json\n"
+        f"10. Discovery manifests: GET {base}/.well-known/x402 | GET {base}/.well-known/x402-service.json | GET {base}/.well-known/mcp.json | GET {base}/openapi.json\n"
         f"11. MCP Server (JSON-RPC 2.0): POST {base}/mcp\n"
         f"12. Full agent integration guide: GET {base}/skill.md\n"
     )

@@ -706,6 +706,16 @@ def test_well_known_x402_mcp_and_openapi_discovery_compliance(client: TestClient
     assert wk_x402_json.status_code == 200
     assert wk_x402_json.json() == x402_doc
 
+    wk_x402_service = client.get("/.well-known/x402-service.json", headers=headers)
+    assert wk_x402_service.status_code == 200
+    svc_doc = wk_x402_service.json()
+    assert svc_doc["x402"] == "1.0"
+    assert svc_doc["endpoint"] == "https://neon-api.austneo.workers.dev/v1/x402/extract"
+    assert svc_doc["payment"]["address"] == config.RECEIVER_ADDRESS_CHECKSUM
+    assert svc_doc["payment"]["chain"] == "base"
+    assert svc_doc["pricing"]["currency"] == "USDC"
+    assert len(svc_doc["services"]) == 3
+
     robots_res = client.get("/robots.txt", headers=headers)
     assert robots_res.status_code == 200
     assert "Allow: /" in robots_res.text

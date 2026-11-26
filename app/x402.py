@@ -413,6 +413,59 @@ def build_well_known_x402_manifest(base_url: str) -> dict[str, Any]:
     }
 
 
+def build_well_known_x402_service_manifest(base_url: str) -> dict[str, Any]:
+    """Build /.well-known/x402-service.json manifest (true402 / x402-service v1.0)."""
+    base = base_url.rstrip("/")
+    extract_price = f"{int(X402_PRICE_ATOMIC) / 1_000_000:g}"
+    links_price = f"{int(X402_LINKS_PRICE_ATOMIC) / 1_000_000:g}"
+    batch_price = f"{int(X402_BATCH_PRICE_ATOMIC) / 1_000_000:g}"
+    facilitator = X402_FACILITATOR_URLS[0] if X402_FACILITATOR_URLS else "https://facilitator.payai.network"
+    return {
+        "x402": "1.0",
+        "name": "Neon Web-to-Markdown API",
+        "description": (
+            "SSRF-safe Web-to-Clean-Markdown extraction, structured outbound link extraction, "
+            "and concurrent batch URL extraction (up to 10 URLs) for AI agents. "
+            "Pay per call with Base USDC (x402 v2/v1)."
+        ),
+        "capabilities": ["web", "extract", "markdown", "links", "scraping", "batch", "readability"],
+        "endpoint": f"{base}/v1/x402/extract",
+        "pricing": {
+            "currency": "USDC",
+            "base": extract_price,
+            "unit": "request",
+        },
+        "payment": {
+            "address": RECEIVER_ADDRESS_CHECKSUM,
+            "chain": "base",
+            "facilitator": facilitator,
+        },
+        "services": [
+            {
+                "id": "extract",
+                "name": "Neon Web-to-Markdown Extract",
+                "capabilities": ["web", "extract", "markdown", "scraping", "readability"],
+                "endpoint": f"{base}/v1/x402/extract",
+                "pricing": {"currency": "USDC", "base": extract_price, "unit": "request"},
+            },
+            {
+                "id": "links",
+                "name": "Neon Outbound Link Extractor",
+                "capabilities": ["web", "links", "crawler", "scraping"],
+                "endpoint": f"{base}/v1/x402/links",
+                "pricing": {"currency": "USDC", "base": links_price, "unit": "request"},
+            },
+            {
+                "id": "extract-batch",
+                "name": "Neon Batch Web-to-Markdown Extract",
+                "capabilities": ["web", "extract", "markdown", "batch", "scraping"],
+                "endpoint": f"{base}/v1/x402/extract/batch",
+                "pricing": {"currency": "USDC", "base": batch_price, "unit": "batch"},
+            },
+        ],
+    }
+
+
 async def default_facilitator_post(url: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     """POST JSON payload to an x402 facilitator endpoint."""
     async with httpx.AsyncClient(timeout=20.0) as client:
