@@ -63,6 +63,10 @@ NOTIFY_SCRIPT_PATH = os.environ.get(
     "NEON_NOTIFY_SCRIPT",
     "/home/neon/workspace/scripts/notify.py",
 )
+INDEX402_CLAIM_PATH = os.environ.get(
+    "NEON_402INDEX_CLAIM_PATH",
+    "/home/neon/workspace/state/402index_claim.json",
+)
 
 CHAINS: dict[str, ChainConfig] = {
     "base": ChainConfig(

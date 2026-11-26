@@ -83,6 +83,32 @@ def build_payment_requirements(
     }
 
 
+def adapt_requirements_for_version(
+    requirements: dict[str, Any],
+    x402_version: int,
+    resource_url: str = "",
+    description: str = "",
+) -> dict[str, Any]:
+    """Normalize paymentRequirements to match x402 v1 ('base') or v2 ('eip155:8453') facilitator expectations."""
+    if x402_version == 1:
+        adapted: dict[str, Any] = {
+            "scheme": requirements.get("scheme", "exact"),
+            "network": "base",
+            "maxAmountRequired": str(requirements.get("maxAmountRequired") or requirements.get("amount", X402_PRICE_ATOMIC)),
+            "asset": requirements.get("asset", BASE_USDC_CHECKSUM),
+            "payTo": requirements.get("payTo", RECEIVER_ADDRESS_CHECKSUM),
+            "maxTimeoutSeconds": requirements.get("maxTimeoutSeconds", 120),
+            "mimeType": "application/json",
+            "extra": dict(requirements.get("extra") or {"name": "USD Coin", "version": "2"}),
+        }
+        if resource_url:
+            adapted["resource"] = resource_url
+        if description:
+            adapted["description"] = description
+        return adapted
+    return dict(requirements)
+
+
 def _default_bazaar_spec(method: str) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     upper_method = method.upper()
     if upper_method == "POST":
@@ -392,8 +418,10 @@ async def verify_payment(
     requirements: dict[str, Any],
     facilitator_urls: tuple[str, ...] | None = None,
     post_fn: FacilitatorPostFn | None = None,
+    resource_url: str = "",
+    description: str = "",
 ) -> dict[str, Any]:
-    """Verify a base64 PAYMENT-SIGNATURE header across configured facilitators."""
+    """Verify a base64 PAYMENT-SIGNATURE / X-PAYMENT header across configured facilitators."""
     payment_payload = decode_b64_json(payment_header)
     raw_ver = payment_payload.get("x402Version", 2)
     try:
@@ -401,26 +429,34 @@ async def verify_payment(
     except (TypeError, ValueError) as exc:
         raise X402Error("Invalid x402Version in payment payload") from exc
     payment_payload = {**payment_payload, "x402Version": x402_version}
+    effective_requirements = adapt_requirements_for_version(
+        requirements,
+        x402_version,
+        resource_url=resource_url,
+        description=description,
+    )
 
     req_body = {
         "x402Version": x402_version,
         "paymentPayload": payment_payload,
-        "paymentRequirements": requirements,
+        "paymentRequirements": effective_requirements,
     }
     sender = post_fn or default_facilitator_post
     urls = facilitator_urls or X402_FACILITATOR_URLS
-    errors: list[str] = []
+    infra_errors: list[str] = []
+    compat_errors: list[str] = []
+    compat_keywords = ("unsupported", "version", "network")
 
     for fac_url in urls:
         endpoint = f"{fac_url.rstrip('/')}/verify"
         try:
             status_code, body = await sender(endpoint, req_body)
         except Exception as exc:
-            errors.append(f"{fac_url}: {type(exc).__name__}")
+            infra_errors.append(f"{fac_url}: {type(exc).__name__}")
             continue
 
         if status_code >= 500 or status_code in (401, 403, 404):
-            errors.append(f"{fac_url}: HTTP {status_code}")
+            infra_errors.append(f"{fac_url}: HTTP {status_code}")
             continue
 
         if body.get("isValid") is True:
@@ -429,16 +465,30 @@ async def verify_payment(
                 "x402_version": x402_version,
                 "payment_payload": payment_payload,
                 "payer": str(body.get("payer", "")),
+                "effective_requirements": effective_requirements,
             }
 
         if body.get("isValid") is False or status_code == 400:
-            reason = str(body.get("invalidReason") or body.get("invalidMessage") or "payment_invalid")
+            reason = str(
+                body.get("invalidReason")
+                or body.get("invalidMessage")
+                or body.get("error")
+                or body.get("message")
+                or "payment_invalid"
+            )
+            if any(kw in reason.lower() for kw in compat_keywords):
+                compat_errors.append(f"{fac_url}: {reason}")
+                continue
             raise X402PaymentRejected(reason)
 
-        errors.append(f"{fac_url}: unexpected response HTTP {status_code}")
+        infra_errors.append(f"{fac_url}: unexpected response HTTP {status_code}")
 
+    if compat_errors and not infra_errors:
+        raise X402PaymentRejected("; ".join(compat_errors))
+
+    all_errors = infra_errors + compat_errors
     raise X402FacilitatorUnavailable(
-        "All x402 facilitators unavailable: " + "; ".join(errors) if errors else "No x402 facilitators configured"
+        "All x402 facilitators unavailable: " + "; ".join(all_errors) if all_errors else "No x402 facilitators configured"
     )
 
 

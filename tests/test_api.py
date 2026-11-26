@@ -806,3 +806,93 @@ def test_x402_links_and_batch_paid_and_ssrf_guard(client: TestClient):
     assert links_ssrf.status_code == 400
     assert batch_ssrf.status_code == 400
     assert settle_count == 2
+
+
+def test_x402_v1_compat_fallback_and_stats_persistence(client: TestClient, monkeypatch):
+    import json
+    from app.x402 import encode_b64_json
+
+    v1_header = encode_b64_json(
+        {
+            "x402Version": 1,
+            "scheme": "exact",
+            "network": "base",
+            "payload": {"signature": "0x" + "aa" * 65, "authorization": {"from": "0x" + "22" * 20}},
+        }
+    )
+    fake_doc = ExtractedDocument(
+        url="https://example.com",
+        title="Example",
+        description="",
+        markdown="# Example\n\nV1 OK.",
+        word_count=3,
+        char_count=17,
+    )
+    tx_hash = "0x" + "55" * 32
+    seen_verify: list[tuple[str, str]] = []
+    settled_networks: list[str] = []
+
+    async def compat_post(url: str, payload: dict):
+        if url.endswith("/verify"):
+            seen_verify.append((url, payload["paymentRequirements"]["network"]))
+            if url.startswith("https://fac1.test"):
+                return 400, {"isValid": False, "invalidReason": "unsupported_x402_version"}
+            assert payload["paymentRequirements"]["network"] == "base"
+            assert payload["paymentRequirements"]["maxAmountRequired"] == config.X402_PRICE_ATOMIC
+            assert "resource" in payload["paymentRequirements"]
+            return 200, {"isValid": True, "payer": "0x" + "22" * 20}
+        if url.endswith("/settle"):
+            settled_networks.append(payload["paymentRequirements"]["network"])
+            assert url.startswith("https://fac2.test")
+            return 200, {
+                "success": True,
+                "transaction": tx_hash,
+                "network": "base",
+                "payer": "0x" + "22" * 20,
+            }
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    monkeypatch.setattr("app.x402.X402_FACILITATOR_URLS", ("https://fac1.test", "https://fac2.test"))
+    with (
+        patch("app.x402.default_facilitator_post", new=compat_post),
+        patch("app.main.extract_url", new=AsyncMock(return_value=fake_doc)),
+    ):
+        res = client.get(
+            "/v1/x402/extract?url=https://example.com",
+            headers={"X-PAYMENT": v1_header, "Host": "neon-api.austneo.workers.dev", "X-Forwarded-Proto": "https"},
+        )
+
+    assert res.status_code == 200
+    assert res.json()["payment"]["transaction"] == tx_hash
+    assert seen_verify == [
+        ("https://fac1.test/verify", "base"),
+        ("https://fac2.test/verify", "base"),
+    ]
+    assert settled_networks == ["base"]
+
+    stats = client.get("/v1/stats")
+    assert stats.status_code == 200
+    sdata = stats.json()
+    assert sdata["x402_payments_count"] == 1
+    assert sdata["x402_usdc_settled"] == 0.01
+    assert sdata["total_usdc_earned"] == 0.01
+
+
+def test_402index_verification_route(client: TestClient, tmp_path, monkeypatch):
+    import json
+
+    missing_path = str(tmp_path / "nonexistent_claim.json")
+    monkeypatch.setattr(main, "INDEX402_CLAIM_PATH", missing_path)
+    r_missing = client.get("/.well-known/402index-verify.txt")
+    assert r_missing.status_code == 404
+
+    claim_file = tmp_path / "claim.json"
+    claim_file.write_text(
+        json.dumps({"domain": "neon-api.austneo.workers.dev", "verification_hash": "deadbeef12345678"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(main, "INDEX402_CLAIM_PATH", str(claim_file))
+    r_ok = client.get("/.well-known/402index-verify.txt")
+    assert r_ok.status_code == 200
+    assert r_ok.headers["content-type"].startswith("text/plain")
+    assert r_ok.text == "deadbeef12345678"

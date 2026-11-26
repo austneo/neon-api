@@ -21,6 +21,7 @@ from .config import (
     DB_PATH,
     FREE_KEYS_PER_IP_24H,
     FREE_TRIAL_CREDITS,
+    INDEX402_CLAIM_PATH,
     NOTIFY_SCRIPT_PATH,
     PERMANENT_PUBLIC_URL,
     RECEIVER_ADDRESS,
@@ -54,6 +55,7 @@ from .db import (
     get_public_stats,
     init_db,
     record_redemption,
+    record_x402_settlement,
 )
 from .extractor import ExtractionError, extract_url
 
@@ -291,6 +293,22 @@ curl -s -X POST {base}/v1/billing/redeem -H 'X-API-Key: YOUR_KEY' -H 'Content-Ty
 async def well_known_x402(request: Request) -> dict[str, Any]:
     """Machine-readable x402 service discovery manifest."""
     return build_well_known_x402_manifest(_public_base_url(request))
+
+
+@app.get("/.well-known/402index-verify.txt", response_class=PlainTextResponse)
+async def well_known_402index_verify() -> PlainTextResponse:
+    """Serve 402 Index domain ownership verification hash without redirect."""
+    if not INDEX402_CLAIM_PATH or not os.path.exists(INDEX402_CLAIM_PATH):
+        raise HTTPException(status_code=404, detail="402index verification hash not configured")
+    try:
+        with open(INDEX402_CLAIM_PATH, "r", encoding="utf-8") as fh:
+            claim_data = json.load(fh)
+        verification_hash = str(claim_data.get("verification_hash", "")).strip()
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail="402index verification hash unavailable") from exc
+    if not verification_hash:
+        raise HTTPException(status_code=404, detail="402index verification hash not configured")
+    return PlainTextResponse(content=verification_hash, status_code=200)
 
 
 @app.get("/.well-known/mcp.json")
@@ -665,7 +683,12 @@ async def _verify_x402_or_challenge(
 
     requirements = build_payment_requirements(amount_atomic=amount_atomic)
     try:
-        verified = await verify_payment(payment_header, requirements)
+        verified = await verify_payment(
+            payment_header,
+            requirements,
+            resource_url=resource_url,
+            description=description,
+        )
     except (X402Error, X402PaymentRejected) as exc:
         return None, None, _x402_402_response(
             resource_url,
@@ -678,7 +701,7 @@ async def _verify_x402_or_challenge(
         )
     except X402FacilitatorUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    return verified, requirements, None
+    return verified, verified.get("effective_requirements", requirements), None
 
 
 async def _settle_and_build_x402_response(
@@ -715,14 +738,28 @@ async def _settle_and_build_x402_response(
 
     amount_usdc = round(int(amount_atomic) / 1_000_000, 6)
     payer = settlement.get("payer", "") or verified.get("payer", "")
+    tx_hash = settlement.get("transaction", "")
+    settled_network = settlement.get("network", BASE_CAIP2)
+    try:
+        init_db(DB_PATH)
+        record_x402_settlement(
+            DB_PATH,
+            tx_hash=tx_hash,
+            network=settled_network,
+            endpoint=path,
+            amount_usdc=amount_usdc,
+            payer=payer,
+        )
+    except Exception:
+        pass
     _record_revenue_event(
         {
             "source": "x402",
             "chain": "base",
-            "network": settlement.get("network", BASE_CAIP2),
+            "network": settled_network,
             "amount_usdc": amount_usdc,
             "credits_added": 0,
-            "tx_hash": settlement.get("transaction", ""),
+            "tx_hash": tx_hash,
             "payer": payer,
         }
     )

@@ -76,6 +76,19 @@ def init_db(db_path: str) -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_free_claims_ip_time ON free_key_claims (ip_hash, claimed_at)"
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS x402_settlements (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tx_hash TEXT NOT NULL,
+                network TEXT NOT NULL,
+                endpoint TEXT NOT NULL,
+                amount_usdc REAL NOT NULL,
+                payer TEXT NOT NULL DEFAULT '',
+                settled_at TEXT NOT NULL
+            )
+            """
+        )
 
 
 def claim_free_api_key(
@@ -248,6 +261,42 @@ def record_redemption(
     return result
 
 
+def record_x402_settlement(
+    db_path: str,
+    *,
+    tx_hash: str,
+    network: str,
+    endpoint: str,
+    amount_usdc: float,
+    payer: str = "",
+) -> dict[str, Any]:
+    """Persist a settled x402 payment event into SQLite."""
+    now = _utc_now()
+    tx_norm = tx_hash.strip()
+    with _connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute(
+                """
+                INSERT INTO x402_settlements (tx_hash, network, endpoint, amount_usdc, payer, settled_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (tx_norm, network, endpoint, float(amount_usdc), payer, now),
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    return {
+        "tx_hash": tx_norm,
+        "network": network,
+        "endpoint": endpoint,
+        "amount_usdc": round(float(amount_usdc), 6),
+        "payer": payer,
+        "settled_at": now,
+    }
+
+
 def get_public_stats(db_path: str) -> dict[str, Any]:
     """Return aggregate non-PII service usage and billing metrics."""
     with _connect(db_path) as conn:
@@ -257,9 +306,17 @@ def get_public_stats(db_path: str) -> dict[str, Any]:
         tx_row = conn.execute(
             "SELECT COUNT(*) AS total_redemptions, COALESCE(SUM(amount_usdc), 0.0) AS total_usdc FROM redeemed_txs"
         ).fetchone()
+        x402_row = conn.execute(
+            "SELECT COUNT(*) AS x402_count, COALESCE(SUM(amount_usdc), 0.0) AS x402_usdc FROM x402_settlements"
+        ).fetchone()
+    total_usdc_redeemed = round(float(tx_row["total_usdc"]) if tx_row else 0.0, 6)
+    x402_usdc_settled = round(float(x402_row["x402_usdc"]) if x402_row else 0.0, 6)
     return {
         "total_api_keys": int(keys_row["total_keys"]) if keys_row else 0,
         "total_extractions_served": int(keys_row["total_extractions"]) if keys_row else 0,
         "total_redemptions": int(tx_row["total_redemptions"]) if tx_row else 0,
-        "total_usdc_redeemed": round(float(tx_row["total_usdc"]) if tx_row else 0.0, 6),
+        "total_usdc_redeemed": total_usdc_redeemed,
+        "x402_payments_count": int(x402_row["x402_count"]) if x402_row else 0,
+        "x402_usdc_settled": x402_usdc_settled,
+        "total_usdc_earned": round(total_usdc_redeemed + x402_usdc_settled, 6),
     }
