@@ -394,10 +394,22 @@ def build_well_known_x402_manifest(base_url: str) -> dict[str, Any]:
             }
         )
     return {
+        "version": 1,
         "x402Version": 2,
         "service": "neon-api",
         "name": "Neon Web-to-Markdown API",
         "baseUrl": base,
+        "networks": [BASE_CAIP2],
+        "asset": BASE_USDC_CHECKSUM,
+        "payTo": RECEIVER_ADDRESS_CHECKSUM,
+        "payment_header": "PAYMENT-SIGNATURE",
+        "challenge_header": "PAYMENT-REQUIRED",
+        "receipt_header": "PAYMENT-RESPONSE",
+        "resources": [
+            f"{base}/v1/x402/extract",
+            f"{base}/v1/x402/links",
+            f"{base}/v1/x402/extract/batch",
+        ],
         "services": services,
     }
 

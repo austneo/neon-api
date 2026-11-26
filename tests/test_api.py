@@ -677,8 +677,16 @@ def test_well_known_x402_mcp_and_openapi_discovery_compliance(client: TestClient
     wk_x402 = client.get("/.well-known/x402", headers=headers)
     assert wk_x402.status_code == 200
     x402_doc = wk_x402.json()
+    assert x402_doc["version"] == 1
     assert x402_doc["x402Version"] == 2
     assert x402_doc["baseUrl"] == "https://neon-api.austneo.workers.dev"
+    assert x402_doc["payTo"] == config.RECEIVER_ADDRESS_CHECKSUM
+    assert x402_doc["networks"] == ["eip155:8453"]
+    assert x402_doc["resources"] == [
+        "https://neon-api.austneo.workers.dev/v1/x402/extract",
+        "https://neon-api.austneo.workers.dev/v1/x402/links",
+        "https://neon-api.austneo.workers.dev/v1/x402/extract/batch",
+    ]
     paths_methods = {(s["path"], s["method"]): s["payment"]["amount"] for s in x402_doc["services"]}
     assert paths_methods == {
         ("/v1/x402/extract", "GET"): config.X402_PRICE_ATOMIC,
